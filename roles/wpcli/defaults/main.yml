@@ -1,13 +1,36 @@
 ---
+# Default variables
+# =================
 
-# Default name of the wp-cli binary
-wpcli_bin_name: 'wp'
+# .. contents:: Sections
+#    :local:
+#
+# ---------------------------
+#   WP-CLI configuration
+# ---------------------------
 
-# Default location to the wp-cli binary
-wpcli_bin_path: '/usr/local/bin'
+# .. envvar:: wpcli__installation_method
+#
+# Installation method used to install WP-CLI. Can be 'download' or 'package'.
+wpcli__installation_method: 'download'
 
-# Default location of the PHAR file
-wpcli_phar_url: 'https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar'
+# .. envvar:: wpcli__base_url
+#
+# Base URL where the WP-CLI program is downloaded from.
+wpcli__base_url: 'https://raw.githubusercontent.com/wp-cli/builds/gh-pages'
 
-# Default share location of the wp-cli binary
-wpcli_share_path: '/usr/share/wp-cli'
+# .. envvar:: wpcli__bin_dir
+#
+# Local system bin directory.
+wpcli__bin_dir: '{{ ansible_local.root.bin
+                         if (ansible_local|d() and ansible_local.root|d() and
+                             ansible_local.root.bin|d())
+                         else "/usr/local/bin" }}'
+
+# .. envvar:: wpcli__src_dir
+#
+# Root directory for WP-CLI sources.
+wpcli__src_dir: '{{ (ansible_local.root.src
+                         if (ansible_local|d() and ansible_local.root|d() and
+                             ansible_local.root.src|d())
+                         else "/usr/local/src") + "/wpcli" }}'

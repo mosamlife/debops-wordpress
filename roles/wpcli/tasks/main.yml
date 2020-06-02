@@ -1,26 +1,39 @@
 ---
 
-- name: Create install location for WP-CLI
+- name: Create WP-CLI source directory
   file:
-    dest: '{{ wpcli_share_path }}'
+    path: '{{ wpcli__src_dir }}'
     state: 'directory'
     owner: 'root'
     group: 'root'
-    mode: '755'
-
-
-- name: Install WP-CLI
-  command: 'curl {{ wpcli_phar_url }} -o {{ wpcli_share_path }}/{{ wpcli_bin_name }}'
-  args:
-    creates: '{{ wpcli_share_path }}/{{ wpcli_bin_name }}'
-
-- name: Set execute bits on WP-CLI
-  file:
-    path: '{{ wpcli_share_path }}/{{ wpcli_bin_name }}'
     mode: '0755'
+  when: wpcli__installation_method == 'package'
 
-- name: Symlink WP-CLI
-  file:
-    dest: '{{ wpcli_bin_path }}/{{ wpcli_bin_name }}'
-    src: '{{ wpcli_share_path }}/{{ wpcli_bin_name }}'
-    state: 'link'
+- name: Get filename of latest WP-CLI package version
+  uri:
+    url: '{{ wpcli__base_url }}/deb/php-wpcli__latest_all.deb'
+    return_content: yes
+  register: wpcli__wp_cli_package
+  when: wpcli__installation_method == 'package'
+
+- name: Download latest WP-CLI package
+  get_url:
+    url: '{{ wpcli__base_url }}/deb/{{ wpcli__wp_cli_package.content }}'
+    dest: '{{ wpcli__src_dir }}/{{ wpcli__wp_cli_package.content }}'
+    mode: '0644'
+    force: no
+  when: wpcli__installation_method == 'package'
+
+- name: Install WP-CLI package
+  apt:
+    deb: '{{ wpcli__src_dir }}/{{ wpcli__wp_cli_package.content }}'
+    state: 'present'
+  when: wpcli__installation_method == 'package'
+
+- name: Download WP-CLI
+  get_url:
+    url: '{{ wpcli__base_url }}/phar/wp-cli.phar'
+    dest: '{{ wpcli__bin_dir }}/wp'
+    mode: '0755'
+    force: 'yes'
+  when: wpcli__installation_method == 'download'

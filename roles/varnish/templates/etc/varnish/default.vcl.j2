@@ -1,38 +1,41 @@
-# This file is managed by Ansible, all changes will be lost
+# {{ ansible_managed }}
 
 vcl 4.0;
-# Based on: https://github.com/mattiasgeniar/varnish-4.0-configuration-templates
+# Based on: https://github.com/mattiasgeniar/varnish-5.0-configuration-templates
 
 import std;
 import directors;
 
-backend webserver {
-  .host = "{{ varnish_backend_host }}";
-  .port = "{{ varnish_backend_port }}";
-  .max_connections = {{ varnish_backend_max_connections }};
+{% for backend in varnish__backends %}
+backend {{ backend.name }} {
+  .host = "{{ backend.host|d(varnish__backend_host) }}";
+  .port = "{{ backend.port|d(varnish__backend_port) }}";
+  .max_connections = {{ backend.max_connections|d(varnish__backend_max_connections) }};
 
+{% if backend.probe|d(True) %}
   .probe = {
-    #.url = "/"; # short easy way (GET /)
-    # We prefer to only do a HEAD /
     .request =
-      "HEAD / HTTP/1.1"
-      "Host: localhost"
-      "Connection: close";
+      "{{ backend.request|d(varnish__backend_probe_request) }}"
+      "Host: {{ backend.probe_host|d(varnish__backend_probe_host) }}"
+      "Connection: close"
+      "User-Agent: {{ backend.probe_user_agent|d(varnish__backend_probe_user_agent) }}";
 
-    .interval  = {{ varnish_backend_probe_interval }};
-    .timeout   = {{ varnish_backend_probe_timeout }};
-    .window    = {{ varnish_backend_probe_window }};
-    .threshold = {{ varnish_backend_probe_threshold }};
+    .interval  = {{ backend.probe_interval|d(varnish__backend_probe_interval) }};
+    .timeout   = {{ backend.probe_timeout|d(varnish__backend_probe_timeout) }};
+    .window    = {{ backend.probe_window|d(varnish__backend_probe_window) }};
+    .threshold = {{ backend.probe_threshold|d(varnish__backend_probe_threshold) }};
   }
+{% endif %}
 
-  .first_byte_timeout     = {{ varnish_backend_first_byte_timeout }};
-  .connect_timeout        = {{ varnish_backend_connect_timeout }};
-  .between_bytes_timeout  = {{ varnish_backend_between_bytes_timeout }};
+  .first_byte_timeout     = {{ backend.first_byte_timeout|d(varnish__backend_first_byte_timeout) }};
+  .connect_timeout        = {{ backend.connect_timeout|d(varnish__backend_connect_timeout) }};
+  .between_bytes_timeout  = {{ backend.between_bytes_timeout|d(varnish__backend_between_bytes_timeout) }};
 }
+{% endfor %}
 
 # ACL we'll use later to allow purges
 acl purge {
-{% for address in varnish_purge_allow %}
+{% for address in varnish__purge_allow %}
   "{{ address }}";
 {% endfor %}
 }
@@ -42,7 +45,9 @@ sub vcl_init {
   # Typically used to initialize VMODs.
 
   new vdir = directors.round_robin();
-  vdir.add_backend(webserver);
+{% for backend in varnish__backends %}
+  vdir.add_backend({{ backend.name }});
+{% endfor %}
 }
 
 sub vcl_recv {
@@ -53,28 +58,25 @@ sub vcl_recv {
 
   set req.backend_hint = vdir.backend(); # send all traffic to the vdir director
 
-  if (req.restarts == 0) {
-    if (req.http.X-Forwarded-For) { # set or append the client.ip to X-Forwarded-For header
-      set req.http.X-Forwarded-For = req.http.X-Forwarded-For + ", " + client.ip;
-    } else {
-      set req.http.X-Forwarded-For = client.ip;
-    }
-  }
-
   # Normalize the header, remove the port (in case you're testing this on various TCP ports)
   set req.http.Host = regsub(req.http.Host, ":[0-9]+", "");
 
-  {% if varnish_normalize_query_parameters %}
+  # Remove the proxy header (see https://httpoxy.org/#mitigate-varnish)
+  unset req.http.proxy;
+
+  {% if varnish__normalize_query_parameters %}
   # Normalize the query arguments
   set req.url = std.querysort(req.url);
   {% endif %}
 
   # Allow purging
   if (req.method == "PURGE") {
-    if (!client.ip ~ purge) { # purge is the ACL defined at the begining
-      # Not from an allowed IP? Then die with an error.
-      return (synth(405, "This IP is not allowed to send PURGE requests."));
+{% for condition, value in varnish__purge_conditions.items() %}
+    if ({{ condition }}) {
+      {{ value | indent(6) }}
     }
+{% endfor %}
+
     # If you got this stage (and didn't error out above), purge the cached result
     return (purge);
   }
@@ -104,9 +106,9 @@ sub vcl_recv {
 
   # Some generic URL manipulation, useful for all templates that follow
   # First remove unwanted query parameters that are useless for our backend
-  if (req.url ~ "(\?|&)({{ varnish_vcl_recv_remove_parameters }})=") {
-    set req.url = regsuball(req.url, "&({{ varnish_vcl_recv_remove_parameters }})=([A-z0-9_\-\.%25]+)", "");
-    set req.url = regsuball(req.url, "\?({{ varnish_vcl_recv_remove_parameters }})=([A-z0-9_\-\.%25]+)", "?");
+  if (req.url ~ "(\?|&)({{ varnish__vcl_recv_remove_parameters }})=") {
+    set req.url = regsuball(req.url, "&({{ varnish__vcl_recv_remove_parameters }})=([A-z0-9_\-\.%25]+)", "");
+    set req.url = regsuball(req.url, "\?({{ varnish__vcl_recv_remove_parameters }})=([A-z0-9_\-\.%25]+)", "?");
     set req.url = regsub(req.url, "\?&", "?");
     set req.url = regsub(req.url, "\?$", "");
   }
@@ -123,7 +125,7 @@ sub vcl_recv {
 
   # Some generic cookie manipulation, useful for all templates that follow
   # Remove unwanted cookies
-{% for cookie in varnish_vcl_recv_remove_cookies %}
+{% for cookie in varnish__vcl_recv_remove_cookies %}
   set req.http.Cookie = regsuball(req.http.Cookie, "{{ cookie }}", "");
 {% endfor %}
 
@@ -142,30 +144,30 @@ sub vcl_recv {
   # like msnbot that send no-cache with every request.
     if (! (req.http.Via || req.http.User-Agent ~ "(?i)bot" || req.http.X-Purge)) {
       #set req.hash_always_miss = true; # Doesn't seems to refresh the object in the cache
-      return(purge); # Couple this with restart in vcl_purge and X-Purge header to avoid loops
+      return (purge); # Couple this with restart in vcl_purge and X-Purge header to avoid loops
     }
   }
 
   # Large static files are delivered directly to the end-user without
   # waiting for Varnish to fully read the file first.
   # Varnish 4 fully supports Streaming, so set do_stream in vcl_backend_response()
-  if (req.url ~ "^[^?]*\.(mp[34]|rar|tar|tgz|gz|wav|zip|bz2|xz|7z|avi|mov|ogm|mpe?g|mk[av])(\?.*)?$") {
+  if (req.url ~ "^[^?]*\.(7z|avi|bz2|flac|flv|gz|mka|mkv|mov|mp3|mp4|mpeg|mpg|ogg|ogm|opus|rar|tar|tgz|tbz|txz|wav|webm|xz|zip)(\?.*)?$") {
     unset req.http.Cookie;
     return (hash);
   }
 
-{% if varnish_cache_static_files %}
+{% if varnish__cache_static_files %}
   # Remove all cookies for static files
-  if (req.url ~ "^[^?]*\.(bmp|bz2|css|doc|eot|flv|gif|gz|ico|jpeg|jpg|js|less|pdf|png|rtf|swf|txt|woff|xml)(\?.*)?$") {
+  if (req.url ~ "^[^?]*\.(7z|avi|bmp|bz2|css|csv|doc|docx|eot|flac|flv|gif|gz|ico|jpeg|jpg|js|less|mka|mkv|mov|mp3|mp4|mpeg|mpg|odt|otf|ogg|ogm|opus|pdf|png|ppt|pptx|rar|rtf|svg|svgz|swf|tar|tbz|tgz|ttf|txt|txz|wav|webm|webp|woff|woff2|xls|xlsx|xml|xz|zip)(\?.*)?$") {
     unset req.http.Cookie;
     return (hash);
   }
 {% endif %}
 
   # Ansible conditions
-{% for condition in varnish_vcl_recv_conditions.keys() %}
+{% for condition, value in varnish__vcl_recv_conditions.items() %}
   if ({{ condition }}) {
-    {{ varnish_vcl_recv_conditions[condition] }}
+    {{ value | indent(4) }}
   }
 {% endfor %}
   # End Ansible conditions
@@ -247,7 +249,7 @@ sub vcl_hit {
   if (!std.healthy(req.backend_hint) && (obj.ttl + obj.grace > 0s)) {
     return (deliver);
   } else {
-    return (fetch);
+    return (miss);
   }
 
   # We have no fresh fish. Lets look at the stale ones.
@@ -258,7 +260,7 @@ sub vcl_hit {
       return (deliver);
     } else {
       # No candidate for grace. Fetch a fresh object.
-      return(fetch);
+      return (miss);
     }
   } else {
     # backend is sick - use full grace
@@ -267,12 +269,12 @@ sub vcl_hit {
       return (deliver);
     } else {
       # no graced object.
-      return (fetch);
+      return (miss);
     }
   }
 
   # fetch & deliver once we get the result
-  return (fetch); # Dead code, keep as a safeguard
+  return (miss); # Dead code, keep as a safeguard
 }
 
 sub vcl_miss {
@@ -293,17 +295,23 @@ sub vcl_backend_response {
     set beresp.do_esi = true;
   }
 
-{% if varnish_cache_static_files %}
+{% if varnish__add_ban_lurker_headers %}
+  # Add ban lurker headers
+  set beresp.http.X-Host = bereq.http.host;
+  set beresp.http.X-URL = bereq.url;
+
+{% endif %}
+{% if varnish__cache_static_files %}
   # Enable cache for all static files
-  if (bereq.url ~ "^[^?]*\.(bmp|bz2|css|doc|eot|flv|gif|gz|ico|jpeg|jpg|js|less|mp[34]|pdf|png|rar|rtf|swf|tar|tgz|txt|wav|woff|xml|zip)(\?.*)?$") {
+  if (bereq.url ~ "^[^?]*\.(bmp|bz2|css|doc|eot|flv|gif|gz|ico|jpeg|jpg|js|less|mp[34]|pdf|png|rar|rtf|swf|tar|tgz|txt|wav|woff|xml|zip|webm)(\?.*)?$") {
     unset beresp.http.set-cookie;
   }
-{% endif %}
 
+{% endif %}
   # Large static files are delivered directly to the end-user without
   # waiting for Varnish to fully read the file first.
   # Varnish 4 fully supports Streaming, so use streaming here to avoid locking.
-  if (bereq.url ~ "^[^?]*\.(mp[34]|rar|tar|tgz|gz|wav|zip|bz2|xz|7z|avi|mov|ogm|mpe?g|mk[av])(\?.*)?$") {
+  if (bereq.url ~ "^[^?]*\.(mp[34]|rar|tar|tgz|gz|wav|zip|bz2|xz|7z|avi|mov|ogm|mpe?g|mk[av]|webm)(\?.*)?$") {
     unset beresp.http.set-cookie;
     set beresp.do_stream = true;  # Check memory usage it'll grow in fetch_chunksize blocks (128k by default) if the backend doesn't send a Content-Length header, so only enable it for big objects
     set beresp.do_gzip = false;   # Don't try to compress it for storage
@@ -319,20 +327,25 @@ sub vcl_backend_response {
     set beresp.http.Location = regsub(beresp.http.Location, ":[0-9]+", "");
   }
 
-  # Set 2min cache if unset for static files
-  if (beresp.ttl <= 0s || beresp.http.Set-Cookie || beresp.http.Vary == "*") {
-    set beresp.ttl = 120s; # Important, you shouldn't rely on this, SET YOUR HEADERS in the backend
-    set beresp.uncacheable = true;
-    return (deliver);
-  }
-
   # Ansible conditions
-{% for condition in varnish_vcl_backend_response_conditions.keys() %}
+{% for condition, value in varnish__vcl_backend_response_conditions.items() %}
   if ({{ condition }}) {
-    {{ varnish_vcl_backend_response_conditions[condition] }}
+    {{ value | indent(4) }}
   }
 {% endfor %}
   # End Ansible conditions
+
+  # Create a hit-for-pass object when TTL is 0s or we're setting a cookie.
+  if (beresp.ttl <= 0s || beresp.http.Set-Cookie || beresp.http.Vary == "*") {
+    set beresp.ttl = 120s;
+    set beresp.uncacheable = true; # Flags the response as hit-for-pass
+    return (deliver);
+  }
+
+  # Don't cache 50x responses
+  if (beresp.status == 500 || beresp.status == 502 || beresp.status == 503 || beresp.status == 504) {
+    return (abandon);
+  }
 
   # Allow stale content, in case the backend goes down.
   # make Varnish keep all objects for 6 hours beyond their TTL
@@ -357,6 +370,12 @@ sub vcl_deliver {
   # So take hits with a grain of salt
   set resp.http.X-Cache-Hits = obj.hits;
 
+{% if varnish__add_ban_lurker_headers %}
+  # Remove ban lurker headers
+  unset resp.http.X-Host;
+  unset resp.http.X-URL;
+
+{% endif %}
   # Remove some headers: PHP version
   unset resp.http.X-Powered-By;
 
@@ -377,7 +396,7 @@ sub vcl_purge {
   if (req.method != "PURGE") {
     # restart request
     set req.http.X-Purge = "Yes";
-    return(restart);
+    return (restart);
   }
 }
 
